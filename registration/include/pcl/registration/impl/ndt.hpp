@@ -95,26 +95,23 @@ NormalDistributionsTransform<PointSource, PointTarget>::computeTransformation (P
   }
 
   // Initialize Point Gradient and Hessian
-  point_gradient_.setZero ();
-  point_gradient_.block<3, 3>(0, 0).setIdentity ();
+  point_jacobian_.setZero ();
+  point_jacobian_.block<3, 3>(0, 0).setIdentity ();
   point_hessian_.setZero ();
 
   Eigen::Transform<float, 3, Eigen::Affine, Eigen::ColMajor> eig_transformation;
   eig_transformation.matrix () = final_transformation_;
 
   // Convert initial guess matrix to 6 element transformation vector
-  Eigen::Matrix<double, 6, 1> p, delta_p, score_gradient;
+  Eigen::Matrix<double, 6, 1> transform, score_gradient;
   Eigen::Vector3f init_translation = eig_transformation.translation ();
   Eigen::Vector3f init_rotation = eig_transformation.rotation ().eulerAngles (0, 1, 2);
-  p << init_translation (0), init_translation (1), init_translation (2),
-  init_rotation (0), init_rotation (1), init_rotation (2);
+  transform << init_translation.cast<double>(), init_rotation.cast<double>();
 
   Eigen::Matrix<double, 6, 6> hessian;
 
-  double score = 0;
-
   // Calculate derivates of initial transform vector, subsequent derivative calculations are done in the step length determination.
-  score = computeDerivatives (score_gradient, hessian, output, p);
+  double score = computeDerivatives (score_gradient, hessian, output, transform);
 
   while (!converged_)
   {
@@ -124,30 +121,30 @@ NormalDistributionsTransform<PointSource, PointTarget>::computeTransformation (P
     // Solve for decent direction using newton method, line 23 in Algorithm 2 [Magnusson 2009]
     Eigen::JacobiSVD<Eigen::Matrix<double, 6, 6> > sv (hessian, Eigen::ComputeFullU | Eigen::ComputeFullV);
     // Negative for maximization as opposed to minimization
-    delta_p = sv.solve (-score_gradient);
+    Eigen::Matrix<double, 6, 1> delta = sv.solve (-score_gradient);
 
     //Calculate step length with guarnteed sufficient decrease [More, Thuente 1994]
-    double delta_p_norm = delta_p.norm ();
+    double delta_norm = delta.norm ();
 
-    if (delta_p_norm == 0 || std::isnan(delta_p_norm))
+    if (delta_norm == 0 || std::isnan(delta_norm))
     {
-      trans_probability_ = score / static_cast<double> (input_->points.size ());
-      converged_ = delta_p_norm == delta_p_norm;
+      trans_probability_ = score / static_cast<double> (input_->size ());
+      converged_ = delta_norm == 0;
       return;
     }
 
-    delta_p.normalize ();
-    delta_p_norm = computeStepLengthMT (p, delta_p, delta_p_norm, step_size_, transformation_epsilon_ / 2, score, score_gradient, hessian, output);
-    delta_p *= delta_p_norm;
+    delta.normalize ();
+    delta_norm = computeStepLengthMT (transform, delta, delta_norm, step_size_, transformation_epsilon_ / 2, score, score_gradient, hessian, output);
+    delta *= delta_norm;
 
 
-    transformation_ = (Eigen::Translation<float, 3> (static_cast<float> (delta_p (0)), static_cast<float> (delta_p (1)), static_cast<float> (delta_p (2))) *
-                       Eigen::AngleAxis<float> (static_cast<float> (delta_p (3)), Eigen::Vector3f::UnitX ()) *
-                       Eigen::AngleAxis<float> (static_cast<float> (delta_p (4)), Eigen::Vector3f::UnitY ()) *
-                       Eigen::AngleAxis<float> (static_cast<float> (delta_p (5)), Eigen::Vector3f::UnitZ ())).matrix ();
+    transformation_ = (Eigen::Translation<float, 3> (delta.head<3>().cast<float>()) *
+                       Eigen::AngleAxis<float> (static_cast<float> (delta (3)), Eigen::Vector3f::UnitX ()) *
+                       Eigen::AngleAxis<float> (static_cast<float> (delta (4)), Eigen::Vector3f::UnitY ()) *
+                       Eigen::AngleAxis<float> (static_cast<float> (delta (5)), Eigen::Vector3f::UnitZ ())).matrix ();
 
 
-    p += delta_p;
+    transform += delta;
 
     // Update Visualizer (untested)
     if (update_visualizer_)
@@ -171,7 +168,7 @@ NormalDistributionsTransform<PointSource, PointTarget>::computeTransformation (P
 
   // Store transformation probability.  The realtive differences within each scan registration are accurate
   // but the normalization constants need to be modified for it to be globally accurate
-  trans_probability_ = score / static_cast<double> (input_->points.size ());
+  trans_probability_ = score / static_cast<double> (input_->size ());
 }
 
 
@@ -179,132 +176,126 @@ template<typename PointSource, typename PointTarget> double
 NormalDistributionsTransform<PointSource, PointTarget>::computeDerivatives (Eigen::Matrix<double, 6, 1> &score_gradient,
                                                                             Eigen::Matrix<double, 6, 6> &hessian,
                                                                             PointCloudSource &trans_cloud,
-                                                                            Eigen::Matrix<double, 6, 1> &p,
+                                                                            Eigen::Matrix<double, 6, 1> &transform,
                                                                             bool compute_hessian)
 {
-  // Original Point and Transformed Point
-  PointSource x_pt, x_trans_pt;
-  // Original Point and Transformed Point (for math)
-  Eigen::Vector3d x, x_trans;
-  // Occupied Voxel
-  TargetGridLeafConstPtr cell;
-  // Inverse Covariance of Occupied Voxel
-  Eigen::Matrix3d c_inv;
-
   score_gradient.setZero ();
   hessian.setZero ();
   double score = 0;
 
   // Precompute Angular Derivatives (eq. 6.19 and 6.21)[Magnusson 2009]
-  computeAngleDerivatives (p);
+  computeAngleDerivatives (transform);
 
   // Update gradient and hessian for each point, line 17 in Algorithm 2 [Magnusson 2009]
-  for (std::size_t idx = 0; idx < input_->points.size (); idx++)
+  for (std::size_t idx = 0; idx < input_->size (); idx++)
   {
-    x_trans_pt = trans_cloud[idx];
+  // Transformed Point
+    const auto& x_trans_pt = trans_cloud[idx];
+    Eigen::Vector3d x_trans = x_trans_pt.getVector3fMap().template cast<double>();
 
-    // Find nieghbors (Radius search has been experimentally faster than direct neighbor checking.
+    // Find neighbors (Radius search has been experimentally faster than direct neighbor checking.
     std::vector<TargetGridLeafConstPtr> neighborhood;
     std::vector<float> distances;
     target_cells_.radiusSearch (x_trans_pt, resolution_, neighborhood, distances);
 
     for (typename std::vector<TargetGridLeafConstPtr>::iterator neighborhood_it = neighborhood.begin (); neighborhood_it != neighborhood.end (); ++neighborhood_it)
     {
-      cell = *neighborhood_it;
-      x_pt = (*input_)[idx];
-      x = Eigen::Vector3d (x_pt.x, x_pt.y, x_pt.z);
+      // Occupied Voxel
+      const auto& cell = *neighborhood_it;
 
-      x_trans = Eigen::Vector3d (x_trans_pt.x, x_trans_pt.y, x_trans_pt.z);
+      // Original Point
+      const auto& x_pt = (*input_)[idx];
+      Eigen::Vector3d x = x_pt.getVector3fMap().template cast<double>();
 
       // Denorm point, x_k' in Equations 6.12 and 6.13 [Magnusson 2009]
       x_trans -= cell->getMean ();
+      // Inverse Covariance of Occupied Voxel
       // Uses precomputed covariance for speed.
-      c_inv = cell->getInverseCov ();
+      Eigen::Matrix3d c_inv = cell->getInverseCov ();
 
       // Compute derivative of transform function w.r.t. transform vector, J_E and H_E in Equations 6.18 and 6.20 [Magnusson 2009]
       computePointDerivatives (x);
       // Update score, gradient and hessian, lines 19-21 in Algorithm 2, according to Equations 6.10, 6.12 and 6.13, respectively [Magnusson 2009]
       score += updateDerivatives (score_gradient, hessian, x_trans, c_inv, compute_hessian);
-
     }
   }
-  return (score);
+  return score;
 }
 
 
 template<typename PointSource, typename PointTarget> void
-NormalDistributionsTransform<PointSource, PointTarget>::computeAngleDerivatives (Eigen::Matrix<double, 6, 1> &p, bool compute_hessian)
+NormalDistributionsTransform<PointSource, PointTarget>::computeAngleDerivatives (Eigen::Matrix<double, 6, 1> &transform, bool compute_hessian)
 {
   // Simplified math for near 0 angles
   double cx, cy, cz, sx, sy, sz;
-  if (std::abs (p (3)) < 10e-5)
+  if (std::abs (transform (3)) < 10e-5)
   {
-    //p(3) = 0;
     cx = 1.0;
     sx = 0.0;
   }
   else
   {
-    cx = std::cos (p (3));
-    sx = sin (p (3));
+    cx = std::cos (transform (3));
+    sx = sin (transform (3));
   }
-  if (std::abs (p (4)) < 10e-5)
+  if (std::abs (transform (4)) < 10e-5)
   {
-    //p(4) = 0;
     cy = 1.0;
     sy = 0.0;
   }
   else
   {
-    cy = std::cos (p (4));
-    sy = sin (p (4));
+    cy = std::cos (transform (4));
+    sy = sin (transform (4));
   }
 
-  if (std::abs (p (5)) < 10e-5)
+  if (std::abs (transform (5)) < 10e-5)
   {
-    //p(5) = 0;
     cz = 1.0;
     sz = 0.0;
   }
   else
   {
-    cz = std::cos (p (5));
-    sz = sin (p (5));
+    cz = std::cos (transform (5));
+    sz = sin (transform (5));
   }
 
-  // Precomputed angular gradiant components. Letters correspond to Equation 6.19 [Magnusson 2009]
-  j_ang_a_ << (-sx * sz + cx * sy * cz), (-sx * cz - cx * sy * sz), (-cx * cy);
-  j_ang_b_ << (cx * sz + sx * sy * cz), (cx * cz - sx * sy * sz), (-sx * cy);
-  j_ang_c_ << (-sy * cz), sy * sz, cy;
-  j_ang_d_ << sx * cy * cz, (-sx * cy * sz), sx * sy;
-  j_ang_e_ << (-cx * cy * cz), cx * cy * sz, (-cx * sy);
-  j_ang_f_ << (-cy * sz), (-cy * cz), 0;
-  j_ang_g_ << (cx * cz - sx * sy * sz), (-cx * sz - sx * sy * cz), 0;
-  j_ang_h_ << (sx * cz + cx * sy * sz), (cx * sy * cz - sx * sz), 0;
+  // Precomputed angular gradient components. Letters correspond to Equation 6.19 [Magnusson 2009]
+  angular_jacobian_.setZero();
+  angular_jacobian_.row(0).noalias() = Eigen::Vector4d((-sx * sz + cx * sy * cz), (-sx * cz - cx * sy * sz), (-cx * cy), 1.0);  // a
+  angular_jacobian_.row(1).noalias() = Eigen::Vector4d((cx * sz + sx * sy * cz), (cx * cz - sx * sy * sz), (-sx * cy), 1.0);    // b
+  angular_jacobian_.row(2).noalias() = Eigen::Vector4d((-sy * cz), sy * sz, cy, 1.0);                                           // c
+  angular_jacobian_.row(3).noalias() = Eigen::Vector4d(sx * cy * cz, (-sx * cy * sz), sx * sy, 1.0);                            // d
+  angular_jacobian_.row(4).noalias() = Eigen::Vector4d((-cx * cy * cz), cx * cy * sz, (-cx * sy), 1.0);                         // e
+  angular_jacobian_.row(5).noalias() = Eigen::Vector4d((-cy * sz), (-cy * cz), 0, 1.0);                                         // f
+  angular_jacobian_.row(6).noalias() = Eigen::Vector4d((cx * cz - sx * sy * sz), (-cx * sz - sx * sy * cz), 0, 1.0);            // g
+  angular_jacobian_.row(7).noalias() = Eigen::Vector4d((sx * cz + cx * sy * sz), (cx * sy * cz - sx * sz), 0, 1.0);             // h
+
 
   if (compute_hessian)
   {
     // Precomputed angular hessian components. Letters correspond to Equation 6.21 and numbers correspond to row index [Magnusson 2009]
-    h_ang_a2_ << (-cx * sz - sx * sy * cz), (-cx * cz + sx * sy * sz), sx * cy;
-    h_ang_a3_ << (-sx * sz + cx * sy * cz), (-cx * sy * sz - sx * cz), (-cx * cy);
+    angular_hessian_.setZero();
+    angular_hessian_.row(0).noalias() = Eigen::Vector4d((-cx * sz - sx * sy * cz), (-cx * cz + sx * sy * sz), sx * cy, 0.0f); // a2
+    angular_hessian_.row(1).noalias() = Eigen::Vector4d((-sx * sz + cx * sy * cz), (-cx * sy * sz - sx * cz), (-cx * cy), 0.0f); // a3
 
-    h_ang_b2_ << (cx * cy * cz), (-cx * cy * sz), (cx * sy);
-    h_ang_b3_ << (sx * cy * cz), (-sx * cy * sz), (sx * sy);
+    angular_hessian_.row(2).noalias() = Eigen::Vector4d((cx * cy * cz), (-cx * cy * sz), (cx * sy), 0.0f); // b2
+    angular_hessian_.row(3).noalias() = Eigen::Vector4d((sx * cy * cz), (-sx * cy * sz), (sx * sy), 0.0f); // b3
 
-    h_ang_c2_ << (-sx * cz - cx * sy * sz), (sx * sz - cx * sy * cz), 0;
-    h_ang_c3_ << (cx * cz - sx * sy * sz), (-sx * sy * cz - cx * sz), 0;
+    angular_hessian_.row(4).noalias() = Eigen::Vector4d((-sx * cz - cx * sy * sz), (sx * sz - cx * sy * cz), 0, 0.0f); // c2
+    angular_hessian_.row(5).noalias() = Eigen::Vector4d((cx * cz - sx * sy * sz), (-sx * sy * cz - cx * sz), 0, 0.0f); // c3
 
-    h_ang_d1_ << (-cy * cz), (cy * sz), (sy);
-    h_ang_d2_ << (-sx * sy * cz), (sx * sy * sz), (sx * cy);
-    h_ang_d3_ << (cx * sy * cz), (-cx * sy * sz), (-cx * cy);
+    angular_hessian_.row(6).noalias() = Eigen::Vector4d((-cy * cz), (cy * sz), (sy), 0.0f); // d1
+    angular_hessian_.row(7).noalias() = Eigen::Vector4d((-sx * sy * cz), (sx * sy * sz), (sx * cy), 0.0f); // d2
+    angular_hessian_.row(8).noalias() = Eigen::Vector4d((cx * sy * cz), (-cx * sy * sz), (-cx * cy), 0.0f); // d3
 
-    h_ang_e1_ << (sy * sz), (sy * cz), 0;
-    h_ang_e2_ << (-sx * cy * sz), (-sx * cy * cz), 0;
-    h_ang_e3_ << (cx * cy * sz), (cx * cy * cz), 0;
+    angular_hessian_.row(9).noalias() = Eigen::Vector4d((sy * sz), (sy * cz), 0, 0.0f); // e1
+    angular_hessian_.row(10).noalias() = Eigen::Vector4d((-sx * cy * sz), (-sx * cy * cz), 0, 0.0f); // e2
+    angular_hessian_.row(11).noalias() = Eigen::Vector4d((cx * cy * sz), (cx * cy * cz), 0, 0.0f); // e3
 
-    h_ang_f1_ << (-cy * cz), (cy * sz), 0;
-    h_ang_f2_ << (-cx * sz - sx * sy * cz), (-cx * cz + sx * sy * sz), 0;
-    h_ang_f3_ << (-sx * sz + cx * sy * cz), (-cx * sy * sz - sx * cz), 0;
+    angular_hessian_.row(12).noalias() = Eigen::Vector4d((-cy * cz), (cy * sz), 0, 0.0f); // f1
+    angular_hessian_.row(13).noalias() = Eigen::Vector4d((-cx * sz - sx * sy * cz), (-cx * cz + sx * sy * sz), 0, 0.0f); // f2
+    angular_hessian_.row(14).noalias() = Eigen::Vector4d((-sx * sz + cx * sy * cz), (-cx * sy * sz - sx * cz), 0, 0.0f); // f3
   }
 }
 
@@ -312,30 +303,31 @@ NormalDistributionsTransform<PointSource, PointTarget>::computeAngleDerivatives 
 template<typename PointSource, typename PointTarget> void
 NormalDistributionsTransform<PointSource, PointTarget>::computePointDerivatives (Eigen::Vector3d &x, bool compute_hessian)
 {
-  // Calculate first derivative of Transformation Equation 6.17 w.r.t. transform vector p.
+  // Calculate first derivative of Transformation Equation 6.17 w.r.t. transform vector.
   // Derivative w.r.t. ith element of transform vector corresponds to column i, Equation 6.18 and 6.19 [Magnusson 2009]
-  point_gradient_ (1, 3) = x.dot (j_ang_a_);
-  point_gradient_ (2, 3) = x.dot (j_ang_b_);
-  point_gradient_ (0, 4) = x.dot (j_ang_c_);
-  point_gradient_ (1, 4) = x.dot (j_ang_d_);
-  point_gradient_ (2, 4) = x.dot (j_ang_e_);
-  point_gradient_ (0, 5) = x.dot (j_ang_f_);
-  point_gradient_ (1, 5) = x.dot (j_ang_g_);
-  point_gradient_ (2, 5) = x.dot (j_ang_h_);
+  Eigen::Matrix<double, 8, 1> point_angular_jacobian = angular_jacobian_ * Eigen::Vector4d(x[0], x[1], x[2], 0.0);
+  point_jacobian_ (1, 3) = point_angular_jacobian[0];
+  point_jacobian_ (2, 3) = point_angular_jacobian[1];
+  point_jacobian_ (0, 4) = point_angular_jacobian[2];
+  point_jacobian_ (1, 4) = point_angular_jacobian[3];
+  point_jacobian_ (2, 4) = point_angular_jacobian[4];
+  point_jacobian_ (0, 5) = point_angular_jacobian[5];
+  point_jacobian_ (1, 5) = point_angular_jacobian[6];
+  point_jacobian_ (2, 5) = point_angular_jacobian[7];
 
   if (compute_hessian)
   {
+    Eigen::Matrix<double, 15, 1> point_angular_hessian = angular_hessian_ * Eigen::Vector4d(x[0], x[1], x[2], 0.0);
+
     // Vectors from Equation 6.21 [Magnusson 2009]
-    Eigen::Vector3d a, b, c, d, e, f;
+    Eigen::Vector3d a(0, point_angular_hessian[0], point_angular_hessian[1]);
+    Eigen::Vector3d b(0, point_angular_hessian[2], point_angular_hessian[3]);
+    Eigen::Vector3d c(0, point_angular_hessian[4], point_angular_hessian[5]);
+    Eigen::Vector3d d(point_angular_hessian[6], point_angular_hessian[7], point_angular_hessian[8]);
+    Eigen::Vector3d e(point_angular_hessian[9], point_angular_hessian[10], point_angular_hessian[11]);
+    Eigen::Vector3d f(point_angular_hessian[12], point_angular_hessian[13], point_angular_hessian[14]);
 
-    a << 0, x.dot (h_ang_a2_), x.dot (h_ang_a3_);
-    b << 0, x.dot (h_ang_b2_), x.dot (h_ang_b3_);
-    c << 0, x.dot (h_ang_c2_), x.dot (h_ang_c3_);
-    d << x.dot (h_ang_d1_), x.dot (h_ang_d2_), x.dot (h_ang_d3_);
-    e << x.dot (h_ang_e1_), x.dot (h_ang_e2_), x.dot (h_ang_e3_);
-    f << x.dot (h_ang_f1_), x.dot (h_ang_f2_), x.dot (h_ang_f3_);
-
-    // Calculate second derivative of Transformation Equation 6.17 w.r.t. transform vector p.
+    // Calculate second derivative of Transformation Equation 6.17 w.r.t. transform vector.
     // Derivative w.r.t. ith and jth elements of transform vector corresponds to the 3x1 block matrix starting at (3i,j), Equation 6.20 and 6.21 [Magnusson 2009]
     point_hessian_.block<3, 1>(9, 3) = a;
     point_hessian_.block<3, 1>(12, 3) = b;
@@ -356,7 +348,6 @@ NormalDistributionsTransform<PointSource, PointTarget>::updateDerivatives (Eigen
                                                                            Eigen::Vector3d &x_trans, Eigen::Matrix3d &c_inv,
                                                                            bool compute_hessian)
 {
-  Eigen::Vector3d cov_dxd_pi;
   // e^(-d_2/2 * (x_k - mu_k)^T Sigma_k^-1 (x_k - mu_k)) Equation 6.9 [Magnusson 2009]
   double e_x_cov_x = std::exp (-gauss_d2_ * x_trans.dot (c_inv * x_trans) / 2);
   // Calculate probability of transformed points existence, Equation 6.9 [Magnusson 2009]
@@ -366,16 +357,17 @@ NormalDistributionsTransform<PointSource, PointTarget>::updateDerivatives (Eigen
 
   // Error checking for invalid values.
   if (e_x_cov_x > 1 || e_x_cov_x < 0 || std::isnan(e_x_cov_x))
-    return (0);
+  {
+    return 0;
+  }
 
   // Reusable portion of Equation 6.12 and 6.13 [Magnusson 2009]
   e_x_cov_x *= gauss_d1_;
 
-
   for (int i = 0; i < 6; i++)
   {
     // Sigma_k^-1 d(T(x,p))/dpi, Reusable portion of Equation 6.12 and 6.13 [Magnusson 2009]
-    cov_dxd_pi = c_inv * point_gradient_.col (i);
+    Eigen::Vector3d cov_dxd_pi = c_inv * point_jacobian_.col (i);
 
     // Update gradient, Equation 6.12 [Magnusson 2009]
     score_gradient (i) += x_trans.dot (cov_dxd_pi) * e_x_cov_x;
@@ -385,38 +377,34 @@ NormalDistributionsTransform<PointSource, PointTarget>::updateDerivatives (Eigen
       for (Eigen::Index j = 0; j < hessian.cols (); j++)
       {
         // Update hessian, Equation 6.13 [Magnusson 2009]
-        hessian (i, j) += e_x_cov_x * (-gauss_d2_ * x_trans.dot (cov_dxd_pi) * x_trans.dot (c_inv * point_gradient_.col (j)) +
+        hessian (i, j) += e_x_cov_x * (-gauss_d2_ * x_trans.dot (cov_dxd_pi) * x_trans.dot (c_inv * point_jacobian_.col (j)) +
                                     x_trans.dot (c_inv * point_hessian_.block<3, 1>(3 * i, j)) +
-                                    point_gradient_.col (j).dot (cov_dxd_pi) );
+                                    point_jacobian_.col (j).dot (cov_dxd_pi) );
       }
     }
   }
 
-  return (score_inc);
+  return score_inc;
 }
 
 
 template<typename PointSource, typename PointTarget> void
 NormalDistributionsTransform<PointSource, PointTarget>::computeHessian (Eigen::Matrix<double, 6, 6> &hessian,
-                                                                        PointCloudSource &trans_cloud, Eigen::Matrix<double, 6, 1> &)
+                                                                        PointCloudSource &trans_cloud)
 {
-  // Original Point and Transformed Point
-  PointSource x_pt, x_trans_pt;
-  // Original Point and Transformed Point (for math)
-  Eigen::Vector3d x, x_trans;
   // Occupied Voxel
   TargetGridLeafConstPtr cell;
-  // Inverse Covariance of Occupied Voxel
-  Eigen::Matrix3d c_inv;
 
   hessian.setZero ();
 
   // Precompute Angular Derivatives unessisary because only used after regular derivative calculation
 
   // Update hessian for each point, line 17 in Algorithm 2 [Magnusson 2009]
-  for (std::size_t idx = 0; idx < input_->points.size (); idx++)
+  for (std::size_t idx = 0; idx < input_->size (); idx++)
   {
-    x_trans_pt = trans_cloud[idx];
+    // Transformed Point
+    const auto& x_trans_pt = trans_cloud[idx];
+    Eigen::Vector3d x_trans = x_trans_pt.getVector3fMap().template cast<double>();
 
     // Find nieghbors (Radius search has been experimentally faster than direct neighbor checking.
     std::vector<TargetGridLeafConstPtr> neighborhood;
@@ -427,22 +415,20 @@ NormalDistributionsTransform<PointSource, PointTarget>::computeHessian (Eigen::M
     {
       cell = *neighborhood_it;
 
-      {
-        x_pt = (*input_)[idx];
-        x = Eigen::Vector3d (x_pt.x, x_pt.y, x_pt.z);
+      // Original Point
+      const auto& x_pt = (*input_)[idx];
+      Eigen::Vector3d x = x_pt.getVector3fMap().template cast<double>();
 
-        x_trans = Eigen::Vector3d (x_trans_pt.x, x_trans_pt.y, x_trans_pt.z);
+      // Denorm point, x_k' in Equations 6.12 and 6.13 [Magnusson 2009]
+      x_trans -= cell->getMean ();
+      // Inverse Covariance of Occupied Voxel
+      // Uses precomputed covariance for speed.
+      Eigen::Matrix3d c_inv = cell->getInverseCov ();
 
-        // Denorm point, x_k' in Equations 6.12 and 6.13 [Magnusson 2009]
-        x_trans -= cell->getMean ();
-        // Uses precomputed covariance for speed.
-        c_inv = cell->getInverseCov ();
-
-        // Compute derivative of transform function w.r.t. transform vector, J_E and H_E in Equations 6.18 and 6.20 [Magnusson 2009]
-        computePointDerivatives (x);
-        // Update hessian, lines 21 in Algorithm 2, according to Equations 6.10, 6.12 and 6.13, respectively [Magnusson 2009]
-        updateHessian (hessian, x_trans, c_inv);
-      }
+      // Compute derivative of transform function w.r.t. transform vector, J_E and H_E in Equations 6.18 and 6.20 [Magnusson 2009]
+      computePointDerivatives (x);
+      // Update hessian, lines 21 in Algorithm 2, according to Equations 6.10, 6.12 and 6.13, respectively [Magnusson 2009]
+      updateHessian (hessian, x_trans, c_inv);
     }
   }
 }
@@ -451,13 +437,14 @@ NormalDistributionsTransform<PointSource, PointTarget>::computeHessian (Eigen::M
 template<typename PointSource, typename PointTarget> void
 NormalDistributionsTransform<PointSource, PointTarget>::updateHessian (Eigen::Matrix<double, 6, 6> &hessian, Eigen::Vector3d &x_trans, Eigen::Matrix3d &c_inv)
 {
-  Eigen::Vector3d cov_dxd_pi;
   // e^(-d_2/2 * (x_k - mu_k)^T Sigma_k^-1 (x_k - mu_k)) Equation 6.9 [Magnusson 2009]
   double e_x_cov_x = gauss_d2_ * std::exp (-gauss_d2_ * x_trans.dot (c_inv * x_trans) / 2);
 
   // Error checking for invalid values.
   if (e_x_cov_x > 1 || e_x_cov_x < 0 || std::isnan(e_x_cov_x))
+  {
     return;
+  }
 
   // Reusable portion of Equation 6.12 and 6.13 [Magnusson 2009]
   e_x_cov_x *= gauss_d1_;
@@ -465,14 +452,14 @@ NormalDistributionsTransform<PointSource, PointTarget>::updateHessian (Eigen::Ma
   for (int i = 0; i < 6; i++)
   {
     // Sigma_k^-1 d(T(x,p))/dpi, Reusable portion of Equation 6.12 and 6.13 [Magnusson 2009]
-    cov_dxd_pi = c_inv * point_gradient_.col (i);
+    Eigen::Vector3d cov_dxd_pi = c_inv * point_jacobian_.col (i);
 
     for (Eigen::Index j = 0; j < hessian.cols (); j++)
     {
       // Update hessian, Equation 6.13 [Magnusson 2009]
-      hessian (i, j) += e_x_cov_x * (-gauss_d2_ * x_trans.dot (cov_dxd_pi) * x_trans.dot (c_inv * point_gradient_.col (j)) +
+      hessian (i, j) += e_x_cov_x * (-gauss_d2_ * x_trans.dot (cov_dxd_pi) * x_trans.dot (c_inv * point_jacobian_.col (j)) +
                                   x_trans.dot (c_inv * point_hessian_.block<3, 1>(3 * i, j)) +
-                                  point_gradient_.col (j).dot (cov_dxd_pi) );
+                                  point_jacobian_.col (j).dot (cov_dxd_pi) );
     }
   }
 
@@ -490,7 +477,7 @@ NormalDistributionsTransform<PointSource, PointTarget>::updateIntervalMT (double
     a_u = a_t;
     f_u = f_t;
     g_u = g_t;
-    return (false);
+    return false;
   }
   // Case U2 in Update Algorithm and Case b in Modified Update Algorithm [More, Thuente 1994]
   if (g_t * (a_l - a_t) > 0)
@@ -498,7 +485,7 @@ NormalDistributionsTransform<PointSource, PointTarget>::updateIntervalMT (double
     a_l = a_t;
     f_l = f_t;
     g_l = g_t;
-    return (false);
+    return false;
   }
   // Case U3 in Update Algorithm and Case c in Modified Update Algorithm [More, Thuente 1994]
   if (g_t * (a_l - a_t) < 0)
@@ -510,10 +497,10 @@ NormalDistributionsTransform<PointSource, PointTarget>::updateIntervalMT (double
     a_l = a_t;
     f_l = f_t;
     g_l = g_t;
-    return (false);
+    return false;
   }
   // Interval Converged
-  return (true);
+  return true;
 }
 
 
@@ -537,8 +524,10 @@ NormalDistributionsTransform<PointSource, PointTarget>::trialValueSelectionMT (d
     double a_q = a_l - 0.5 * (a_l - a_t) * g_l / (g_l - (f_l - f_t) / (a_l - a_t));
 
     if (std::fabs (a_c - a_l) < std::fabs (a_q - a_l))
-      return (a_c);
-    return (0.5 * (a_q + a_c));
+    {
+      return a_c;
+    }
+    return 0.5 * (a_q + a_c);
   }
   // Case 2 in Trial Value Selection [More, Thuente 1994]
   if (g_t * g_l < 0)
@@ -555,8 +544,10 @@ NormalDistributionsTransform<PointSource, PointTarget>::trialValueSelectionMT (d
     double a_s = a_l - (a_l - a_t) / (g_l - g_t) * g_l;
 
     if (std::fabs (a_c - a_t) >= std::fabs (a_s - a_t))
-      return (a_c);
-    return (a_s);
+    {
+      return a_c;
+    }
+    return a_s;
   }
   // Case 3 in Trial Value Selection [More, Thuente 1994]
   if (std::fabs (g_t) <= std::fabs (g_l))
@@ -574,13 +565,19 @@ NormalDistributionsTransform<PointSource, PointTarget>::trialValueSelectionMT (d
     double a_t_next;
 
     if (std::fabs (a_c - a_t) < std::fabs (a_s - a_t))
+    {
       a_t_next = a_c;
+    }
     else
+    {
       a_t_next = a_s;
+    }
 
     if (a_t > a_l)
-      return (std::min (a_t + 0.66 * (a_u - a_t), a_t_next));
-    return (std::max (a_t + 0.66 * (a_u - a_t), a_t_next));
+    {
+      return std::min (a_t + 0.66 * (a_u - a_t), a_t_next);
+    }
+    return std::max (a_t + 0.66 * (a_u - a_t), a_t_next);
   }
   // Case 4 in Trial Value Selection [More, Thuente 1994]
   // Calculate the minimizer of the cubic that interpolates f_u, f_t, g_u and g_t
@@ -588,9 +585,8 @@ NormalDistributionsTransform<PointSource, PointTarget>::trialValueSelectionMT (d
   double z = 3 * (f_t - f_u) / (a_t - a_u) - g_t - g_u;
   double w = std::sqrt (z * z - g_t * g_u);
   // Equation 2.4.56 [Sun, Yuan 2006]
-  return (a_u + (a_t - a_u) * (w - g_u - z) / (g_t - g_u + 2 * w));
+  return a_u + (a_t - a_u) * (w - g_u - z) / (g_t - g_u + 2 * w);
 }
-
 
 template<typename PointSource, typename PointTarget> double
 NormalDistributionsTransform<PointSource, PointTarget>::computeStepLengthMT (const Eigen::Matrix<double, 6, 1> &x, Eigen::Matrix<double, 6, 1> &step_dir, double step_init, double step_max,
@@ -602,17 +598,16 @@ NormalDistributionsTransform<PointSource, PointTarget>::computeStepLengthMT (con
   // Set the value of phi'(0), Equation 1.3 [More, Thuente 1994]
   double d_phi_0 = -(score_gradient.dot (step_dir));
 
-  Eigen::Matrix<double, 6, 1>  x_t;
-
   if (d_phi_0 >= 0)
   {
     // Not a decent direction
     if (d_phi_0 == 0)
+    {
       return 0;
+    }
     // Reverse step direction and calculate optimal step.
     d_phi_0 *= -1;
     step_dir *= -1;
-
   }
 
   // The Search Algorithm for T(mu) [More, Thuente 1994]
@@ -642,9 +637,9 @@ NormalDistributionsTransform<PointSource, PointTarget>::computeStepLengthMT (con
   a_t = std::min (a_t, step_max);
   a_t = std::max (a_t, step_min);
 
-  x_t = x + step_dir * a_t;
+  Eigen::Matrix<double, 6, 1> x_t = x + step_dir * a_t;
 
-  final_transformation_ = (Eigen::Translation<float, 3>(static_cast<float> (x_t (0)), static_cast<float> (x_t (1)), static_cast<float> (x_t (2))) *
+  final_transformation_ = (Eigen::Translation<float, 3>(x_t.head<3>().cast<float>()) *
                            Eigen::AngleAxis<float> (static_cast<float> (x_t (3)), Eigen::Vector3f::UnitX ()) *
                            Eigen::AngleAxis<float> (static_cast<float> (x_t (4)), Eigen::Vector3f::UnitY ()) *
                            Eigen::AngleAxis<float> (static_cast<float> (x_t (5)), Eigen::Vector3f::UnitZ ())).matrix ();
@@ -688,7 +683,7 @@ NormalDistributionsTransform<PointSource, PointTarget>::computeStepLengthMT (con
 
     x_t = x + step_dir * a_t;
 
-    final_transformation_ = (Eigen::Translation<float, 3> (static_cast<float> (x_t (0)), static_cast<float> (x_t (1)), static_cast<float> (x_t (2))) *
+    final_transformation_ = (Eigen::Translation<float, 3> (x_t.head<3>().cast<float>()) *
                              Eigen::AngleAxis<float> (static_cast<float> (x_t (3)), Eigen::Vector3f::UnitX ()) *
                              Eigen::AngleAxis<float> (static_cast<float> (x_t (4)), Eigen::Vector3f::UnitY ()) *
                              Eigen::AngleAxis<float> (static_cast<float> (x_t (5)), Eigen::Vector3f::UnitZ ())).matrix ();
@@ -746,9 +741,11 @@ NormalDistributionsTransform<PointSource, PointTarget>::computeStepLengthMT (con
   // Hessian is unnessisary for step length determination but gradients are required
   // so derivative and transform data is stored for the next iteration.
   if (step_iterations)
-    computeHessian (hessian, trans_cloud, x_t);
+  {
+    computeHessian (hessian, trans_cloud);
+  }
 
-  return (a_t);
+  return a_t;
 }
 
 } // namespace pcl
