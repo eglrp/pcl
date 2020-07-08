@@ -191,7 +191,6 @@ NormalDistributionsTransform<PointSource, PointTarget>::computeDerivatives (Eige
   {
   // Transformed Point
     const auto& x_trans_pt = trans_cloud[idx];
-    Eigen::Vector3d x_trans = x_trans_pt.getVector3fMap().template cast<double>();
 
     // Find neighbors (Radius search has been experimentally faster than direct neighbor checking.
     std::vector<TargetGridLeafConstPtr> neighborhood;
@@ -208,7 +207,7 @@ NormalDistributionsTransform<PointSource, PointTarget>::computeDerivatives (Eige
       Eigen::Vector3d x = x_pt.getVector3fMap().template cast<double>();
 
       // Denorm point, x_k' in Equations 6.12 and 6.13 [Magnusson 2009]
-      x_trans -= cell->getMean ();
+      Eigen::Vector3d x_trans = x_trans_pt.getVector3fMap().template cast<double>() - cell->getMean ();
       // Inverse Covariance of Occupied Voxel
       // Uses precomputed covariance for speed.
       Eigen::Matrix3d c_inv = cell->getInverseCov ();
