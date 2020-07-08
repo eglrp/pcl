@@ -133,7 +133,7 @@ NormalDistributionsTransform<PointSource, PointTarget>::computeTransformation (P
       return;
     }
 
-    delta.normalize ();
+    delta /= delta_norm;
     delta_norm = computeStepLengthMT (transform, delta, delta_norm, step_size_, transformation_epsilon_ / 2, score, score_gradient, hessian, output);
     delta *= delta_norm;
 
@@ -227,38 +227,23 @@ template<typename PointSource, typename PointTarget> void
 NormalDistributionsTransform<PointSource, PointTarget>::computeAngleDerivatives (Eigen::Matrix<double, 6, 1> &transform, bool compute_hessian)
 {
   // Simplified math for near 0 angles
-  double cx, cy, cz, sx, sy, sz;
-  if (std::abs (transform (3)) < 10e-5)
-  {
-    cx = 1.0;
-    sx = 0.0;
-  }
-  else
-  {
-    cx = std::cos (transform (3));
-    sx = sin (transform (3));
-  }
-  if (std::abs (transform (4)) < 10e-5)
-  {
-    cy = 1.0;
-    sy = 0.0;
-  }
-  else
-  {
-    cy = std::cos (transform (4));
-    sy = sin (transform (4));
-  }
+  auto calculate_cos_sin = [](double angle, double& c, double &s) {
+    if(std::abs(angle) < 10e-5)
+    {
+      c = 1.0;
+      s = 0.0;
+    }
+    else
+    {
+      c = std::cos(angle);
+      s = std::sin(angle);
+    }
+  };
 
-  if (std::abs (transform (5)) < 10e-5)
-  {
-    cz = 1.0;
-    sz = 0.0;
-  }
-  else
-  {
-    cz = std::cos (transform (5));
-    sz = sin (transform (5));
-  }
+  double cx, cy, cz, sx, sy, sz;
+  calculate_cos_sin(transform(3), cx, sx);
+  calculate_cos_sin(transform(4), cy, sy);
+  calculate_cos_sin(transform(5), cz, sz);
 
   // Precomputed angular gradient components. Letters correspond to Equation 6.19 [Magnusson 2009]
   angular_jacobian_.setZero();
