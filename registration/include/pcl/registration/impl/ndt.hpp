@@ -197,11 +197,8 @@ NormalDistributionsTransform<PointSource, PointTarget>::computeDerivatives (Eige
     std::vector<float> distances;
     target_cells_.radiusSearch (x_trans_pt, resolution_, neighborhood, distances);
 
-    for (typename std::vector<TargetGridLeafConstPtr>::iterator neighborhood_it = neighborhood.begin (); neighborhood_it != neighborhood.end (); ++neighborhood_it)
+    for (const auto& cell: neighborhood)
     {
-      // Occupied Voxel
-      const auto& cell = *neighborhood_it;
-
       // Original Point
       const auto& x_pt = (*input_)[idx];
       Eigen::Vector3d x = x_pt.getVector3fMap().template cast<double>();
@@ -226,7 +223,7 @@ template<typename PointSource, typename PointTarget> void
 NormalDistributionsTransform<PointSource, PointTarget>::computeAngleDerivatives (Eigen::Matrix<double, 6, 1> &transform, bool compute_hessian)
 {
   // Simplified math for near 0 angles
-  auto calculate_cos_sin = [](double angle, double& c, double &s) {
+  const auto calculate_cos_sin = [](double angle, double& c, double &s) {
     if(std::abs(angle) < 10e-5)
     {
       c = 1.0;
@@ -376,35 +373,28 @@ template<typename PointSource, typename PointTarget> void
 NormalDistributionsTransform<PointSource, PointTarget>::computeHessian (Eigen::Matrix<double, 6, 6> &hessian,
                                                                         PointCloudSource &trans_cloud)
 {
-  // Occupied Voxel
-  TargetGridLeafConstPtr cell;
-
   hessian.setZero ();
 
   // Precompute Angular Derivatives unessisary because only used after regular derivative calculation
-
   // Update hessian for each point, line 17 in Algorithm 2 [Magnusson 2009]
   for (std::size_t idx = 0; idx < input_->size (); idx++)
   {
     // Transformed Point
     const auto& x_trans_pt = trans_cloud[idx];
-    Eigen::Vector3d x_trans = x_trans_pt.getVector3fMap().template cast<double>();
 
     // Find nieghbors (Radius search has been experimentally faster than direct neighbor checking.
     std::vector<TargetGridLeafConstPtr> neighborhood;
     std::vector<float> distances;
     target_cells_.radiusSearch (x_trans_pt, resolution_, neighborhood, distances);
 
-    for (typename std::vector<TargetGridLeafConstPtr>::iterator neighborhood_it = neighborhood.begin (); neighborhood_it != neighborhood.end (); ++neighborhood_it)
+    for (const auto& cell: neighborhood)
     {
-      cell = *neighborhood_it;
-
       // Original Point
       const auto& x_pt = (*input_)[idx];
       Eigen::Vector3d x = x_pt.getVector3fMap().template cast<double>();
 
       // Denorm point, x_k' in Equations 6.12 and 6.13 [Magnusson 2009]
-      x_trans -= cell->getMean ();
+      Eigen::Vector3d x_trans = x_trans_pt.getVector3fMap().template cast<double>() - cell->getMean ();
       // Inverse Covariance of Occupied Voxel
       // Uses precomputed covariance for speed.
       Eigen::Matrix3d c_inv = cell->getInverseCov ();
