@@ -113,6 +113,14 @@ NormalDistributionsTransform<PointSource, PointTarget>::computeTransformation (P
   // Calculate derivates of initial transform vector, subsequent derivative calculations are done in the step length determination.
   double score = computeDerivatives (score_gradient, hessian, output, transform);
 
+  std::cout << "--- ndt new ---" << std::endl;
+  std::cout << "--- before iteration ---" << std::endl;
+  std::cout << "score:" << score << std::endl;
+  std::cout << "score_gradient:" << score_gradient.transpose() << std::endl;
+  std::cout << "derivative:" << point_jacobian_.transpose() << std::endl;
+  std::cout << "hessian:" << std::endl << hessian << std::endl;
+  std::cout << "transform:" << transform.transpose() << std::endl;
+
   while (!converged_)
   {
     // Store previous transformation
@@ -164,6 +172,14 @@ NormalDistributionsTransform<PointSource, PointTarget>::computeTransformation (P
     {
       converged_ = true;
     }
+
+    std::cout << "--- before iteration ---" << std::endl;
+    std::cout << "score:" << score << std::endl;
+    std::cout << "score_gradient:" << score_gradient.transpose() << std::endl;
+    std::cout << "derivative:" << point_jacobian_.transpose() << std::endl;
+    std::cout << "hessian:" << std::endl << hessian << std::endl;
+    std::cout << "transform:" << transform.transpose() << std::endl;
+    std::cout << "delta:" << delta.transpose() << std::endl;
   }
 
   // Store transformation probability.  The realtive differences within each scan registration are accurate
