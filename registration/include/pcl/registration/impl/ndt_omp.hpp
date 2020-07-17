@@ -175,7 +175,7 @@ NormalDistributionsTransformOMP<PointSource, PointTarget>::computeDerivatives (E
   std::vector<double> scores(input_->size());
   std::vector<Eigen::Matrix<double, 6, 1>, Eigen::aligned_allocator<Eigen::Matrix<double, 6, 1>>> score_gradients(input_->size());
   std::vector<Eigen::Matrix<double, 6, 6>, Eigen::aligned_allocator<Eigen::Matrix<double, 6, 6>>> hessians(input_->size());
-  for (int i = 0; i < input_->points.size(); i++) {
+  for (std::size_t i = 0; i < input_->size(); i++) {
     scores[i] = 0;
     score_gradients[i].setZero();
     hessians[i].setZero();
