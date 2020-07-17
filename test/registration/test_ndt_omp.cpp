@@ -109,7 +109,7 @@ TEST (PCL, NormalDistributionsTransformOMP_DIRECT27)
   PointCloud<PointT> output;
 
   NormalDistributionsTransformOMP<PointT, PointT> reg;
-  reg.setNeighborSearchMethod(NeighborSearchMethod::DIRECT26);
+  reg.setNeighborSearchMethod(NeighborSearchMethod::DIRECT27);
   reg.setStepSize (0.05);
   reg.setResolution (0.025f);
   reg.setInputSource (src);

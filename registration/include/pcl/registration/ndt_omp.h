@@ -50,11 +50,19 @@
 
 namespace pcl
 {
+  
+  /**
+   * \brief Method to find neighbor voxels around a point
+   * \note This offers a tradeoff between stability and registration speed.
+   *       DIRECT1 uses the voxel, which the point fell into (up to 1 voxel per point). This makes registration extremely fast but a bit unstable in particular when the initial guess is not accurate.
+   *       DIRECT7 uses the voxel at the point and its facing voxels (up to 7 voxels per point). This strikes a good balance between registration stability and speed in a typical use case.
+   *       DIRECT27 uses the voxel at the point and its 3x3x3 neighboring voxels (up to 27 voxels per point).
+   *       KDTREE uses a kdtree search (radius = voxel resolution) to find neighbor voxels. With this method, the registration result will be identical to the result of the orginal NDT implementation.   */
   enum class NeighborSearchMethod {
-    KDTREE,
-    DIRECT26,
+    DIRECT1,
     DIRECT7,
-    DIRECT1
+    DIRECT27,
+    KDTREE
   };
 
   /** \brief A 3D Normal Distribution Transform registration implementation for point cloud data.
@@ -107,14 +115,6 @@ namespace pcl
       
       /** \brief Empty destructor */
       ~NormalDistributionsTransformOMP () {}
-
-      void setNumThreads(int num_threads) {
-        num_threads_ = num_threads;
-      }
-
-      void setNeighborSearchMethod(NeighborSearchMethod method) {
-        search_method_ = method;
-      }
 
       /** \brief Provide a pointer to the input target (e.g., the point cloud that we want to align the input source to).
         * \param[in] cloud the input point cloud target
@@ -204,6 +204,46 @@ namespace pcl
       getFinalNumIteration () const
       {
         return nr_iterations_;
+      }
+
+      /**
+       * \brief Set the number of threads to be used
+       * \param[in] num_threads The number of threads
+       */
+      inline void
+      setNumThreads(int num_threads)
+      {
+        num_threads_ = num_threads;
+      }
+
+      /**
+       * \brief Get the number of threads to be used
+       * \return The number of threads
+       */
+      inline int
+      getNumThreads() const
+      {
+        return num_threads_;
+      }
+
+      /**
+       * \brief Set the neighbor voxel search method
+       * \param[in] Voxel search method
+       */
+      inline void
+      setNeighborSearchMethod(NeighborSearchMethod method)
+      {
+        search_method_ = method;
+      }
+
+      /**
+       * \brief Get the neighbor voxel search method
+       * \return Voxel search method
+       */
+      inline NeighborSearchMethod
+      getNeighborSearchMethod() const
+      {
+        return search_method_;
       }
 
       /** \brief Convert 6 element transformation vector to affine transformation.
