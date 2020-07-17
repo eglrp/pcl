@@ -368,7 +368,7 @@ NormalDistributionsTransformOMP<PointSource, PointTarget>::updateDerivatives (Ei
                                                                            const Eigen::Vector3d &x_trans, const Eigen::Matrix3d &c_inv,
                                                                            bool compute_hessian) const
 {
-  Eigen::Matrix<float, 1, 4> x_trans_f( x_trans[0], x_trans[1], x_trans[2], 0.0f );
+  const Eigen::Matrix<float, 1, 4> x_trans_f( x_trans[0], x_trans[1], x_trans[2], 0.0f );
   Eigen::Matrix4f c_inv_f = Eigen::Matrix4f::Zero();
   c_inv_f.block<3, 3>(0, 0) = c_inv.cast<float>();
 

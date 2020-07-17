@@ -522,8 +522,10 @@ namespace pcl
         */
       Eigen::Matrix<float, 16, 4> angular_hessian_;
 
+      /** \brief Number of threads */
       int num_threads_;
 
+      /** \brief Neighbor voxel search method */
       NeighborSearchMethod search_method_;
     public:
       PCL_MAKE_ALIGNED_OPERATOR_NEW
